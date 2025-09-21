@@ -90,6 +90,128 @@ def capture_from_camera(save_path):
             cv2.destroyAllWindows()
             return save_path
 
+def identify_group(file_path):
+    print(f"Processing group photo for identification: {file_path}")
+    if not file_path:
+        print("No file selected")
+        return
+
+    # Handle HEIC format
+    if file_path.lower().endswith('.heic'):
+        jpg_path = os.path.splitext(file_path)[0] + ".jpg"
+        print(f"Converting {file_path} to {jpg_path}...")
+        result = subprocess.run(["magick", "convert", file_path, jpg_path])
+        if result.returncode != 0:
+            print(f"Failed to convert {file_path} to JPG.")
+            return
+        file_path = jpg_path
+
+    # Extract faces using DeepFace
+    faces = DeepFace.extract_faces(img_path=file_path, detector_backend="retinaface")
+    if not faces:
+        print("No faces found in the group photo.")
+        return
+
+    # Load the image
+    img = cv2.imread(file_path)
+    print(f"\nFound {len(faces)} faces in the photo.")
+
+    # Sort faces from left to right
+    face_positions = []
+    for idx, face in enumerate(faces):
+        region = face["facial_area"]
+        x = region["x"]
+        face_positions.append((x, idx, face))
+    
+    # Sort by x coordinate
+    face_positions.sort()  # This will sort based on x coordinate (left to right)
+
+    # Process each face
+    face_images = []
+    identities = []
+    max_height = 0
+    max_width = 0
+
+    for position, idx, face in face_positions:
+        region = face["facial_area"]
+        x, y, w, h = region["x"], region["y"], region["w"], region["h"]
+        
+        # Extract and process face
+        pad = 20
+        y_start = max(0, y - pad)
+        y_end = min(img.shape[0], y + h + pad)
+        x_start = max(0, x - pad)
+        x_end = min(img.shape[1], x + w + pad)
+        
+        face_img = img[y_start:y_end, x_start:x_end].copy()
+        
+        # Try to identify this face
+        try:
+            face_path = f"temp_face_{idx}.jpg"
+            cv2.imwrite(face_path, face_img)
+            emb = DeepFace.represent(img_path=face_path, model_name="Facenet")[0]["embedding"]
+            emb = np.array(emb)
+            emb = emb / np.linalg.norm(emb)
+            
+            # Find matches in database
+            conn = sqlite3.connect(DB)
+            c = conn.cursor()
+            c.execute("SELECT person, embedding FROM faces")
+            rows = c.fetchall()
+            conn.close()
+
+            # Find best match
+            best_match = None
+            best_dist = float('inf')
+            for person, stored_emb in rows:
+                known_emb = np.array(pickle.loads(stored_emb))
+                dist = np.linalg.norm(emb - known_emb)
+                if dist < best_dist and dist < 1.0:  # Using 1.0 as threshold
+                    best_dist = dist
+                    best_match = person
+
+            # Add number to corner and enhance image
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            face_img = cv2.copyMakeBorder(face_img, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+            cv2.putText(face_img, str(idx+1), (10, 30), font, 1, (0, 255, 0), 2)
+            
+            # Store results
+            face_images.append(face_img)
+            identities.append((idx+1, best_match if best_match else "Unknown"))
+            max_height = max(max_height, face_img.shape[0])
+            max_width = max(max_width, face_img.shape[1])
+            
+            os.remove(face_path)  # Clean up temporary file
+            
+        except Exception as e:
+            print(f"Error processing face {idx+1}: {str(e)}")
+            identities.append((idx+1, "Error"))
+
+    # Create and show grid of faces
+    grid_size = int(np.ceil(np.sqrt(len(face_images))))
+    canvas = np.ones((max_height * ((len(face_images)-1)//grid_size + 1), 
+                     max_width * grid_size, 3), dtype=np.uint8) * 255
+
+    for idx, face_img in enumerate(face_images):
+        i, j = idx // grid_size, idx % grid_size
+        y_offset = i * max_height + (max_height - face_img.shape[0]) // 2
+        x_offset = j * max_width + (max_width - face_img.shape[1]) // 2
+        canvas[y_offset:y_offset + face_img.shape[0],
+               x_offset:x_offset + face_img.shape[1]] = face_img
+
+    # Show results
+    cv2.imshow("Group Identification", canvas)
+    cv2.moveWindow("Group Identification", 100, 100)
+    cv2.waitKey(100)
+
+    # Print identifications from left to right
+    print("\nPeople in the photo (from left to right):")
+    for number, name in identities:
+        print(f"#{number}: {name}")
+
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
 def identify(file):
     try:
         test_emb = DeepFace.represent(img_path=file, model_name="Facenet")[0]["embedding"]
@@ -283,7 +405,8 @@ if __name__ == "__main__":
         print("1. Tag faces from group photo")
         print("2. Add individual faces")
         print("3. Test face recognition")
-        print("4. Exit")
+        print("4. Identify group in photo")
+        print("5. Exit")
         
         choice = input("\nEnter your choice (1-4): ").strip()
         
@@ -351,5 +474,11 @@ if __name__ == "__main__":
                         identify(test)
         
         elif choice == '4':
+            print("\n--- Group Photo Identification ---")
+            photo_path = get_group_photo()
+            if photo_path:
+                identify_group(photo_path)
+                
+        elif choice == '5':
             print("\nExiting program. Goodbye!")
             break
