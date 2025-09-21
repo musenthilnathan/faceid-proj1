@@ -1,5 +1,7 @@
 import cv2
 import os
+import subprocess
+
 def erase_db():
     if os.path.exists(DB):
         os.remove(DB)
@@ -156,6 +158,57 @@ def identify(file):
     else:
         print("No match found (all distances above threshold)")
 
+def process_group_photo(file_path):
+    # Handle HEIC format
+    if file_path.lower().endswith('.heic'):
+        jpg_path = os.path.splitext(file_path)[0] + ".jpg"
+        print(f"Converting {file_path} to {jpg_path}...")
+        # Use ImageMagick's 'magick' command for conversion
+        result = subprocess.run(["magick", "convert", file_path, jpg_path])
+        if result.returncode != 0:
+            print(f"Failed to convert {file_path} to JPG. Make sure ImageMagick is installed and supports HEIC.")
+            return
+        file_path = jpg_path
+
+    # Extract faces using DeepFace
+    faces = DeepFace.extract_faces(img_path=file_path, detector_backend="retinaface")
+    if not faces:
+        print("No faces found in the group photo.")
+        return
+
+    # Load the image and show thumbnails
+    img = cv2.imread(file_path)
+    print(f"\nFound {len(faces)} faces in the group photo.")
+    print("Showing each face with a number. Enter names for each face when prompted.")
+    
+    # Display faces with numbers
+    for idx, face in enumerate(faces, 1):
+        region = face["facial_area"]
+        x, y, w, h = region["x"], region["y"], region["w"], region["h"]
+        face_img = img[y:y+h, x:x+w]
+        
+        # Show face with number
+        cv2.imshow(f"Face {idx}", face_img)
+        cv2.moveWindow(f"Face {idx}", 100 + (idx-1)*200, 100)
+        
+    # Get names for each face
+    for idx, face in enumerate(faces, 1):
+        name = input(f"\nEnter name for face {idx} (or press Enter to skip): ").strip()
+        if name:
+            # Save face image
+            region = face["facial_area"]
+            x, y, w, h = region["x"], region["y"], region["w"], region["h"]
+            face_img = img[y:y+h, x:x+w]
+            save_path = f"{name}_group_{idx}.jpg"
+            cv2.imwrite(save_path, face_img)
+            # Store in database
+            store_embeddings(name, [save_path])
+            print(f"Stored face {idx} as {name}")
+    
+    # Clean up windows
+    for idx in range(1, len(faces) + 1):
+        cv2.destroyWindow(f"Face {idx}")
+
 def choose_files(multiple=True):
     root = tk.Tk(); root.withdraw()
     if multiple:
@@ -163,71 +216,96 @@ def choose_files(multiple=True):
     else:
         return filedialog.askopenfilename(title="Pick test image")
 
+def get_group_photo():
+    method = input("Get group photo from (f)ile, (c)amera, or (q)uit? [f/c/q]: ").strip().lower()
+    if method == 'q':
+        return None
+    elif method == 'c':
+        save_path = "group_photo.jpg"
+        return capture_from_camera(save_path)
+    else:
+        return choose_files(multiple=False)
+
 if __name__ == "__main__":
     erase = input("Erase the database and start fresh? (y/n): ").strip().lower()
     if erase == 'y':
         erase_db()
     init_db()
 
-    # Initial message only
-    print("--- Face Database Setup ---")
-
-    # Optionally add more images for existing or new people
+    print("=== Face Recognition System ===")
     while True:
-        # Always refresh and display known people and image counts before the prompt
-        conn = sqlite3.connect(DB)
-        c = conn.cursor()
-        c.execute("SELECT person, COUNT(*) FROM faces GROUP BY person")
-        known_people = c.fetchall()
-        conn.close()
-        if known_people:
-            print("Known people in the database:")
-            for idx, (pname, pcount) in enumerate(known_people, 1):
-                print(f"  {idx}. {pname}  |  No of images available: {pcount}")
-        else:
-            print("No known people in the database yet.")
-        person_input = input("Enter serial number or name to add images for (or just press Enter to finish): ").strip()
-        if not person_input:
-            break
-        # Try to resolve serial number
-        conn = sqlite3.connect(DB)
-        c = conn.cursor()
-        c.execute("SELECT person, COUNT(*) FROM faces GROUP BY person")
-        known_people = c.fetchall()
-        conn.close()
-        name = None
-        if person_input.isdigit() and known_people:
-            idx = int(person_input) - 1
-            if 0 <= idx < len(known_people):
-                name = known_people[idx][0]
-        if not name:
-            name = person_input
-        method = input("Add images from (f)ile or (c)amera? [f/c]: ").strip().lower()
-        if method == 'c':
-            save_path = f"{name}_cam.jpg"
-            img_path = capture_from_camera(save_path)
-            if img_path:
-                store_embeddings(name, [img_path])
-        else:
-            files = choose_files(multiple=True)
-            store_embeddings(name, files)
+        print("\nOptions:")
+        print("1. Tag faces from group photo")
+        print("2. Add individual faces")
+        print("3. Test face recognition")
+        print("4. Exit")
+        
+        choice = input("\nEnter your choice (1-4): ").strip()
+        
+        if choice == '1':
+            photo_path = get_group_photo()
+            if photo_path:
+                process_group_photo(photo_path)
+        elif choice == '2':
+            print("\n--- Adding Individual Faces ---")
 
-    while True:
-        print("Now select a test image (or 'q' to quit)...")
-        method = input("Test image from (f)ile, (c)amera, or (q)uit? [f/c/q]: ").strip().lower()
-        if method == 'q':
-            print("Exiting test phase.")
+            # Add individual faces menu
+            while True:
+                # Show known people
+                conn = sqlite3.connect(DB)
+                c = conn.cursor()
+                c.execute("SELECT person, COUNT(*) FROM faces GROUP BY person")
+                known_people = c.fetchall()
+                conn.close()
+                if known_people:
+                    print("\nKnown people in the database:")
+                    for idx, (pname, pcount) in enumerate(known_people, 1):
+                        print(f"  {idx}. {pname}  |  No of images available: {pcount}")
+                else:
+                    print("\nNo known people in the database yet.")
+                
+                person_input = input("\nEnter number/name to add images for (or press Enter to go back): ").strip()
+                if not person_input:
+                    break
+                
+                # Resolve name
+                name = None
+                if person_input.isdigit() and known_people:
+                    idx = int(person_input) - 1
+                    if 0 <= idx < len(known_people):
+                        name = known_people[idx][0]
+                if not name:
+                    name = person_input
+                
+                # Get images
+                method = input("Add images from (f)ile or (c)amera? [f/c]: ").strip().lower()
+                if method == 'c':
+                    save_path = f"{name}_cam.jpg"
+                    img_path = capture_from_camera(save_path)
+                    if img_path:
+                        store_embeddings(name, [img_path])
+                else:
+                    files = choose_files(multiple=True)
+                    if files:
+                        store_embeddings(name, files)
+        
+        elif choice == '3':
+            # Test face recognition
+            while True:
+                print("\n--- Face Recognition Test ---")
+                method = input("Test image from (f)ile, (c)amera, or (b)ack? [f/c/b]: ").strip().lower()
+                if method == 'b':
+                    break
+                elif method == 'c':
+                    test_path = "test_cam.jpg"
+                    img_path = capture_from_camera(test_path)
+                    if img_path:
+                        identify(img_path)
+                else:
+                    test = choose_files(multiple=False)
+                    if test:
+                        identify(test)
+        
+        elif choice == '4':
+            print("\nExiting program. Goodbye!")
             break
-        elif method == 'c':
-            test_path = "test_cam.jpg"
-            img_path = capture_from_camera(test_path)
-            if not img_path:
-                print("No image captured. Exiting test phase.")
-                break
-            identify(img_path)
-        else:
-            test = choose_files(multiple=False)
-            if not test:
-                print("No file selected. Exiting test phase.")
-                break
-            identify(test)
