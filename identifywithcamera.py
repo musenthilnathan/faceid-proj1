@@ -1,6 +1,14 @@
 import cv2
 import os
 import subprocess
+import numpy as np
+import sqlite3
+import tkinter as tk
+from tkinter import filedialog
+from deepface import DeepFace
+import pickle
+
+DB = "faces.db"
 
 def erase_db():
     if os.path.exists(DB):
@@ -8,12 +16,6 @@ def erase_db():
         print(f"Database {DB} erased.")
     else:
         print(f"Database {DB} does not exist.")
-import sqlite3, tkinter as tk
-from tkinter import filedialog
-from deepface import DeepFace
-import numpy as np, pickle
-
-DB = "faces.db"
 
 def init_db():
     conn = sqlite3.connect(DB)
@@ -52,6 +54,7 @@ def capture_from_camera(save_path):
     def on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             captured[0] = True
+    
     cv2.namedWindow("Camera", cv2.WINDOW_NORMAL)
     # Try to bring the window to the front (works on most platforms)
     try:
@@ -59,7 +62,7 @@ def capture_from_camera(save_path):
     except Exception:
         pass
     cv2.setMouseCallback("Camera", on_mouse)
-    import subprocess, time
+    
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -73,12 +76,7 @@ def capture_from_camera(save_path):
             cv2.setWindowProperty("Camera", cv2.WND_PROP_TOPMOST, 1)
         except Exception:
             pass
-        # Add a short delay before using wmctrl to allow the window to appear
-        time.sleep(0.1)
-        try:
-            subprocess.run(['wmctrl', '-r', 'Camera', '-b', 'add,above'], check=False)
-        except Exception:
-            pass
+        
         k = cv2.waitKey(1)
         if k%256 == 27:  # ESC pressed
             print("Capture cancelled.")
@@ -87,29 +85,6 @@ def capture_from_camera(save_path):
             return None
         if captured[0]:
             cv2.imwrite(save_path, frame_holder[0])
-            print(f"Image saved to {save_path}")
-            cap.release()
-            cv2.destroyAllWindows()
-            return save_path
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Could not open camera.")
-        return None
-    print("Press SPACE to capture, ESC to cancel.")
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to grab frame.")
-            break
-        cv2.imshow("Camera", frame)
-        k = cv2.waitKey(1)
-        if k%256 == 27:  # ESC pressed
-            print("Capture cancelled.")
-            cap.release()
-            cv2.destroyAllWindows()
-            return None
-        elif k%256 == 32:  # SPACE pressed
-            cv2.imwrite(save_path, frame)
             print(f"Image saved to {save_path}")
             cap.release()
             cv2.destroyAllWindows()
@@ -159,11 +134,15 @@ def identify(file):
         print("No match found (all distances above threshold)")
 
 def process_group_photo(file_path):
+    print(f"Processing group photo: {file_path}")
+    if not file_path:
+        print("No file selected")
+        return
+        
     # Handle HEIC format
     if file_path.lower().endswith('.heic'):
         jpg_path = os.path.splitext(file_path)[0] + ".jpg"
         print(f"Converting {file_path} to {jpg_path}...")
-        # Use ImageMagick's 'magick' command for conversion
         result = subprocess.run(["magick", "convert", file_path, jpg_path])
         if result.returncode != 0:
             print(f"Failed to convert {file_path} to JPG. Make sure ImageMagick is installed and supports HEIC.")
@@ -181,50 +160,116 @@ def process_group_photo(file_path):
     print(f"\nFound {len(faces)} faces in the group photo.")
     print("Showing each face with a number. Enter names for each face when prompted.")
     
-    # Display faces with numbers
+    # Process and arrange faces in a grid
+    face_images = []
+    max_height = 0
+    max_width = 0
+    
+    # First pass: extract and process all faces
     for idx, face in enumerate(faces, 1):
         region = face["facial_area"]
         x, y, w, h = region["x"], region["y"], region["w"], region["h"]
-        face_img = img[y:y+h, x:x+w]
         
-        # Show face with number
-        cv2.imshow(f"Face {idx}", face_img)
-        cv2.moveWindow(f"Face {idx}", 100 + (idx-1)*200, 100)
+        # Add padding around face
+        pad = 20
+        y_start = max(0, y - pad)
+        y_end = min(img.shape[0], y + h + pad)
+        x_start = max(0, x - pad)
+        x_end = min(img.shape[1], x + w + pad)
         
-    # Get names for each face
-    for idx, face in enumerate(faces, 1):
-        name = input(f"\nEnter name for face {idx} (or press Enter to skip): ").strip()
+        face_img = img[y_start:y_end, x_start:x_end].copy()
+        
+        # Enhance image
+        face_img_float = face_img.astype(float)
+        if face_img_float.max() > 0:
+            face_img_float = (face_img_float - face_img_float.min()) * 255 / (face_img_float.max() - face_img_float.min())
+        face_img = face_img_float.astype(np.uint8)
+        
+        # Add white border
+        face_img = cv2.copyMakeBorder(face_img, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+        
+        # Adjust contrast and brightness
+        face_img = cv2.convertScaleAbs(face_img, alpha=1.2, beta=10)
+        
+        # Add number to corner
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(face_img, str(idx), (10, 30), font, 1, (0, 255, 0), 2)
+        
+        face_images.append(face_img)
+        max_height = max(max_height, face_img.shape[0])
+        max_width = max(max_width, face_img.shape[1])
+    
+    # Calculate grid layout
+    n_faces = len(face_images)
+    grid_size = int(np.ceil(np.sqrt(n_faces)))
+    
+    # Create blank canvas for grid
+    canvas = np.ones((max_height * ((n_faces-1)//grid_size + 1), 
+                     max_width * grid_size, 3), dtype=np.uint8) * 255
+    
+    # Place faces in grid
+    for idx, face_img in enumerate(face_images):
+        i, j = idx // grid_size, idx % grid_size
+        
+        # Center the face in its grid cell
+        y_offset = i * max_height + (max_height - face_img.shape[0]) // 2
+        x_offset = j * max_width + (max_width - face_img.shape[1]) // 2
+        
+        canvas[y_offset:y_offset + face_img.shape[0],
+               x_offset:x_offset + face_img.shape[1]] = face_img
+    
+    # Show grid
+    cv2.imshow("All Faces", canvas)
+    cv2.moveWindow("All Faces", 100, 100)
+    cv2.waitKey(100)
+    
+    # Save grid for reference
+    cv2.imwrite("all_faces_grid.jpg", canvas)
+    print("\nSaved all faces to all_faces_grid.jpg")
+    print("Face numbers are shown in green in the top-left corner of each face.")
+    
+    # Get names for each face while showing the grid
+    print("\nLooking at the grid image with numbered faces:")
+    for idx, face_img in enumerate(face_images, 1):
+        name = input(f"\nEnter name for face #{idx} (or press Enter to skip): ").strip()
         if name:
-            # Save face image
-            region = face["facial_area"]
-            x, y, w, h = region["x"], region["y"], region["w"], region["h"]
-            face_img = img[y:y+h, x:x+w]
+            # Save individual face
             save_path = f"{name}_group_{idx}.jpg"
             cv2.imwrite(save_path, face_img)
             # Store in database
             store_embeddings(name, [save_path])
             print(f"Stored face {idx} as {name}")
     
-    # Clean up windows
-    for idx in range(1, len(faces) + 1):
-        cv2.destroyWindow(f"Face {idx}")
+    # Clean up
+    cv2.destroyAllWindows()
 
 def choose_files(multiple=True):
-    root = tk.Tk(); root.withdraw()
-    if multiple:
-        return filedialog.askopenfilenames(title="Select images")
-    else:
-        return filedialog.askopenfilename(title="Pick test image")
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        if multiple:
+            result = filedialog.askopenfilenames(title="Select images")
+        else:
+            result = filedialog.askopenfilename(title="Pick test image")
+        root.destroy()
+        return result
+    except Exception as e:
+        print(f"Error in file dialog: {e}")
+        return None
 
 def get_group_photo():
     method = input("Get group photo from (f)ile, (c)amera, or (q)uit? [f/c/q]: ").strip().lower()
+    print(f"Selected method: {method}")
     if method == 'q':
         return None
     elif method == 'c':
         save_path = "group_photo.jpg"
         return capture_from_camera(save_path)
     else:
-        return choose_files(multiple=False)
+        print("Opening file dialog...")
+        file_path = choose_files(multiple=False)
+        print(f"Selected file: {file_path}")
+        return file_path
 
 if __name__ == "__main__":
     erase = input("Erase the database and start fresh? (y/n): ").strip().lower()
@@ -248,7 +293,6 @@ if __name__ == "__main__":
                 process_group_photo(photo_path)
         elif choice == '2':
             print("\n--- Adding Individual Faces ---")
-
             # Add individual faces menu
             while True:
                 # Show known people
